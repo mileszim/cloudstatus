@@ -6,7 +6,11 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "cloudstatus",
 	"compatibility_date": "2026-08-23",
-	"main": "vinext/server/fetch-handler",
+	/**
+	 * Custom worker entry. vinext's default (`vinext/server/fetch-handler`) only exports
+	 * `fetch`; we delegate to it and add a `scheduled` handler for the monitoring cron.
+	 */
+	"main": "worker/index.ts",
 	"assets": {
 		"directory": "dist/client",
 		"not_found_handling": "none",
@@ -21,28 +25,50 @@
 	"observability": {
 		"enabled": true
 	},
-	"upload_source_maps": true
+	"upload_source_maps": true,
+
+	/** Everything the status page stores: components, incidents, monitors, subscribers. */
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "cloudstatus",
+			// Replace with the id from `npx wrangler d1 create cloudstatus`.
+			// Local development uses miniflare's own store and ignores this value.
+			"database_id": "00000000-0000-0000-0000-000000000000",
+			"migrations_dir": "migrations"
+		}
+	],
+
+	/** Short-TTL cache for the public JSON API and rendered status payloads. */
+	"kv_namespaces": [
+		{
+			"binding": "CACHE",
+			// Replace with the id from `npx wrangler kv namespace create CACHE`.
+			"id": "00000000000000000000000000000000"
+		}
+	],
+
 	/**
-	 * Smart Placement
-	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
+	 * Outbound subscriber email. Requires a domain onboarded to Cloudflare Email Service.
+	 * Without it, email notifications are skipped and logged; every other channel still works.
 	 */
-	// "placement": {  "mode": "smart" }
+	"send_email": [
+		{
+			"name": "EMAIL"
+			// Add "remote": true to send real mail from `wrangler dev`. Left off so
+			// local development simulates delivery (messages are written to disk).
+		}
+	],
+
 	/**
-	 * Bindings
-	 * Bindings allow your Worker to interact with resources on the Cloudflare Developer Platform, including
-	 * databases, object storage, AI inference, real-time communication and more.
-	 * https://developers.cloudflare.com/workers/runtime-apis/bindings/
+	 * "* * * * *"  — run due monitor checks, transition scheduled maintenance, retry notifications.
+	 * "17 3 * * *" — roll raw checks into daily uptime buckets and prune old rows.
 	 */
-	/**
-	 * Environment Variables
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
-	 * Note: Use secrets to store sensitive data.
-	 * https://developers.cloudflare.com/workers/configuration/secrets/
-	 */
-	// "vars": {  "MY_VARIABLE": "production_value" }
-	/**
-	 * Service Bindings (communicate between multiple Workers)
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
-	 */
-	// "services": [  {   "binding": "MY_SERVICE",   "service": "my-service"  } ]
+	"triggers": {
+		"crons": ["* * * * *", "17 3 * * *"]
+	},
+
+	"vars": {
+		"SITE_URL": "http://localhost:3000"
+	}
 }

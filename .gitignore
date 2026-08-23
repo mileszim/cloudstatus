@@ -9,3 +9,7 @@ next-env.d.ts
 .dev.vars*
 !.dev.vars.example
 !.env.example
+
+# generated seed output
+.seed.sql
+.dev.vars
