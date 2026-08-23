@@ -3,7 +3,7 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-import { verifyPassword } from "@/lib/auth/password";
+import { explainFailure, verifyPassword } from "@/lib/auth/password";
 import {
   SESSION_COOKIE,
   createSessionCookieValue,
@@ -41,8 +41,22 @@ export async function login(_prev: LoginState, formData: FormData): Promise<Logi
     return { error: "Enter your password." };
   }
 
-  if (!(await verifyPassword(password, verifier))) {
-    return { error: "That password is not correct." };
+  const result = await verifyPassword(password, verifier);
+
+  if (!result.ok) {
+    if (result.reason === "mismatch") {
+      return { error: "That password is not correct." };
+    }
+
+    // The stored verifier itself is unusable, so no password could ever work
+    // here. Saying "not correct" would send the operator looking for a typo
+    // that does not exist — this page is admin-only and the message names no
+    // secret value, so it reports the real problem instead.
+    const detail = explainFailure(result.reason);
+    console.error(`[login] ADMIN_PASSWORD_HASH is unusable: ${detail}`);
+    return {
+      error: `The configured admin password cannot be checked: ${detail}. Re-run \`npm run hash-password\` and store only the verifier itself.`,
+    };
   }
 
   const store = await cookies();
