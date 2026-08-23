@@ -63,10 +63,13 @@ npm run migrate:local
 
 ### 2. Set secrets
 
-Generate an admin password verifier:
+Generate an admin password verifier. Run it with no argument so the password
+is typed rather than passed through the shell — a shell rewrites `$`, `!`, and
+backticks inside double quotes, which silently hashes something other than the
+password you will type at sign-in:
 
 ```bash
-npm run hash-password -- "your-admin-password"
+npm run hash-password
 ```
 
 Create `.dev.vars` for local development:
@@ -78,7 +81,20 @@ INGEST_SECRET=<random string>
 EMAIL_FROM=status@yourdomain.com
 ```
 
-For production, set the same four with `npx wrangler secret put <NAME>`.
+For production, set the same four with `npx wrangler secret put <NAME>`. When
+prompted, paste **only** the `pbkdf2$…` value — not the whole
+`ADMIN_PASSWORD_HASH=pbkdf2$…` line the generator prints for `.dev.vars`.
+
+To confirm a password and a stored verifier agree, without deploying anything:
+
+```bash
+npm run hash-password -- --check
+```
+
+With no second argument it reads `ADMIN_PASSWORD_HASH` from `.dev.vars`; pass a
+verifier to check one you have copied from somewhere else. If sign-in rejects a
+password you are sure of, run this first — it distinguishes a wrong password
+from a verifier that was damaged in transit.
 
 | Secret | Purpose |
 | --- | --- |

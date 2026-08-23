@@ -11,7 +11,12 @@
 SEEKRIT_TOKEN=
 
 # Generate the password verifier with:
-#   npm run hash-password -- "your-admin-password"
+#   npm run hash-password
+# Run it with no argument so the shell cannot rewrite a password containing
+# $, !, or backticks. Store only the `pbkdf2$...` value — a pasted
+# `ADMIN_PASSWORD_HASH=` prefix or wrapping quotes are tolerated, a truncated
+# value is not. Check a password against what is stored here with:
+#   npm run hash-password -- --check
 ADMIN_PASSWORD_HASH=
 
 # Signs admin session cookies. Any long random string; rotating it signs everyone out.
