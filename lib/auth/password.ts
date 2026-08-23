@@ -2,27 +2,35 @@
  * Admin password verification.
  *
  * PBKDF2-SHA256 via WebCrypto — available in workerd with no dependency, and
- * the iteration count is stored alongside the hash so it can be raised later
- * without invalidating existing verifiers.
+ * the iteration count is stored alongside the hash so it can be raised if the
+ * platform ceiling below ever moves.
  *
  * Verifier format: `pbkdf2$<iterations>$<salt-b64>$<hash-b64>`
  */
 
-const ITERATIONS = 210_000;
+/**
+ * The most PBKDF2 iterations Cloudflare Workers will perform in one call.
+ *
+ * A platform limit, not a preference: production rejects anything above it with
+ * `NotSupportedError: Pbkdf2 failed: iteration counts above 100000 are not
+ * supported`, as a DoS guard for a multi-tenant runtime. Local workerd does NOT
+ * enforce it, so a higher count passes every local test and fails only once
+ * deployed — which is how a 210,000-iteration default shipped here and made
+ * admin sign-in impossible in production while working perfectly in dev.
+ *
+ * OWASP would prefer more for PBKDF2-SHA256. Reaching it would mean chaining
+ * several capped calls; this deployment accepts the ceiling instead.
+ *
+ * @see https://github.com/cloudflare/workerd/issues/1346
+ */
+const MAX_ITERATIONS = 100_000;
+
+const ITERATIONS = MAX_ITERATIONS;
 const KEY_LENGTH = 32;
 const SALT_LENGTH = 16;
 
-/**
- * Iteration bounds accepted from a stored verifier.
- *
- * The ceiling is not a formality. `deriveBits` rejects outright once the count
- * approaches 2^31, and every count below that is CPU this Worker spends on an
- * unauthenticated POST — so an absurd value in the secret store is both a
- * broken login and a way to burn the request budget of anyone hitting the form.
- * The window is wide enough to raise ITERATIONS by an order of magnitude.
- */
+/** Below this a verifier did not come from this generator, whatever else it looks like. */
 const MIN_ITERATIONS = 1_000;
-const MAX_ITERATIONS = 1_000_000;
 
 function toBase64(bytes: Uint8Array): string {
   return btoa(String.fromCharCode(...bytes));
@@ -173,11 +181,11 @@ export function explainFailure(reason: VerifyFailure): string {
     case "not-pbkdf2":
       return "ADMIN_PASSWORD_HASH does not start with `pbkdf2` — check for a copied prefix or a value from another tool";
     case "bad-iterations":
-      return `the iteration count in ADMIN_PASSWORD_HASH is not a whole number between ${MIN_ITERATIONS} and ${MAX_ITERATIONS} — the value was not produced by \`npm run hash-password\``;
+      return `the iteration count in ADMIN_PASSWORD_HASH is not a whole number between ${MIN_ITERATIONS} and ${MAX_ITERATIONS} — Cloudflare Workers refuses more than ${MAX_ITERATIONS} iterations per call, so a verifier generated before that ceiling applied can never be checked here and must be regenerated with \`npm run hash-password\``;
     case "not-a-string":
       return "ADMIN_PASSWORD_HASH did not resolve to a string — check how it is stored in seekrit or the Worker environment";
     case "derive-rejected":
-      return "the runtime refused to derive a key from ADMIN_PASSWORD_HASH — its parameters are out of range, so no password can ever match it";
+      return `the runtime refused to derive a key from ADMIN_PASSWORD_HASH even though its parameters look valid — on Cloudflare Workers this means the iteration count is above the ${MAX_ITERATIONS} ceiling, and the verifier must be regenerated`;
     case "undecodable":
       return "the salt or digest in ADMIN_PASSWORD_HASH is not valid base64 — the value was probably line-wrapped or truncated in transit";
     case "wrong-digest-size":

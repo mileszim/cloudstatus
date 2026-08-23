@@ -12,7 +12,19 @@ import { webcrypto as crypto } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
-const ITERATIONS = 210_000;
+/**
+ * Cloudflare Workers refuses more than this many PBKDF2 iterations per call, as
+ * a DoS guard. Local workerd does NOT enforce it, so this script must — Node's
+ * crypto happily derives at any count, and blessing a verifier here that
+ * production cannot check is worse than not checking at all.
+ *
+ * Keep in step with MAX_ITERATIONS in lib/auth/password.ts.
+ * @see https://github.com/cloudflare/workerd/issues/1346
+ */
+const MAX_ITERATIONS = 100_000;
+
+const ITERATIONS = MAX_ITERATIONS;
+const MIN_ITERATIONS = 1_000;
 const KEY_LENGTH = 32;
 const SALT_LENGTH = 16;
 
@@ -64,8 +76,15 @@ async function check(password, verifier) {
   }
 
   const iterations = Number(parts[1]);
-  if (!Number.isInteger(iterations) || iterations < 1000) {
-    return { error: `\`${parts[1]}\` is not an iteration count of at least 1000` };
+  if (!Number.isInteger(iterations) || iterations < MIN_ITERATIONS) {
+    return { error: `\`${parts[1]}\` is not an iteration count of at least ${MIN_ITERATIONS}` };
+  }
+  if (iterations > MAX_ITERATIONS) {
+    return {
+      error:
+        `the iteration count is ${iterations}, above the ${MAX_ITERATIONS} that Cloudflare Workers will perform.\n` +
+        `  This verifier can be checked here but never in production — regenerate it`,
+    };
   }
 
   const salt = Buffer.from(parts[2], "base64");
