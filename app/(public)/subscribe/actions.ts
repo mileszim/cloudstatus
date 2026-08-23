@@ -1,6 +1,6 @@
 "use server";
 
-import { drain, enqueueDirect } from "@/lib/notify/dispatch";
+import { enqueueDirect } from "@/lib/notify/dispatch";
 import { createSubscriber } from "@/lib/status/mutations";
 import { getSettings } from "@/lib/status/settings";
 
@@ -49,7 +49,6 @@ export async function subscribe(
         },
         `confirm:${subscriber.confirmToken}`,
       );
-      await drain();
     }
 
     return {

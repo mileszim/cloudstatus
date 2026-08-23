@@ -40,6 +40,47 @@
 	],
 
 	/**
+	 * Subscriber notification fan-out.
+	 *
+	 * The producer binding is used by every write that notifies subscribers; the
+	 * consumer delivers them off the request path. Queues owns retry scheduling
+	 * and the dead-letter hand-off, so there is no polling loop.
+	 *
+	 * Create both with:
+	 *   npx wrangler queues create cloudstatus-notifications
+	 *   npx wrangler queues create cloudstatus-notifications-dlq
+	 */
+	"queues": {
+		"producers": [
+			{
+				"binding": "NOTIFICATIONS",
+				"queue": "cloudstatus-notifications"
+			}
+		],
+		"consumers": [
+			{
+				"queue": "cloudstatus-notifications",
+				// Small batches: each message is an outbound email or HTTP call, and
+				// a smaller batch means a poisoned message retries less company.
+				"max_batch_size": 10,
+				"max_batch_timeout": 5,
+				"max_retries": 5,
+				"dead_letter_queue": "cloudstatus-notifications-dlq",
+				// Cap concurrency so a large incident cannot open hundreds of
+				// simultaneous connections to one mail provider.
+				"max_concurrency": 3
+			},
+			{
+				// Terminal failures. The handler records why on the notification row
+				// so the delivery log in the dashboard shows what happened.
+				"queue": "cloudstatus-notifications-dlq",
+				"max_batch_size": 10,
+				"max_retries": 0
+			}
+		]
+	},
+
+	/**
 	 * Outbound subscriber email. Requires a domain onboarded to Cloudflare Email Service.
 	 * Without it, email notifications are skipped and logged; every other channel still works.
 	 */

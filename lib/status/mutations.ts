@@ -1,6 +1,6 @@
 import { db, now } from "@/lib/db/client";
 import { newId, newToken } from "@/lib/db/id";
-import { drain, enqueue, mirrorToSlack } from "@/lib/notify/dispatch";
+import { enqueue, mirrorToSlack } from "@/lib/notify/dispatch";
 import type { NotificationPayload } from "@/lib/notify/payload";
 import { getSettings } from "@/lib/status/settings";
 import {
@@ -41,16 +41,19 @@ async function audit(
 }
 
 /**
- * Sends a payload to subscribers and the operator's Slack mirror.
+ * Hands a payload to the notification queue and the operator's Slack mirror.
  *
- * Delivery is awaited rather than backgrounded: the caller is a Server Action
- * or route handler that already has the request open, the ledger makes retries
- * safe, and an operator posting an incident update deserves to find out
- * immediately if notifications are broken.
+ * This returns as soon as the rows are written and the messages are queued —
+ * an operator posting an incident update during an outage waits on D1, not on
+ * a mail provider. The delivery log in the dashboard is where you check what
+ * actually went out.
+ *
+ * The Slack mirror is not queued: it is one request to one endpoint the
+ * operator configured, it is already failure-tolerant, and seeing it appear
+ * immediately is part of how they confirm the update landed.
  */
 async function notify(payload: NotificationPayload, dedupeKey: string): Promise<void> {
-  await enqueue(payload, dedupeKey);
-  await Promise.allSettled([drain(), mirrorToSlack(payload)]);
+  await Promise.allSettled([enqueue(payload, dedupeKey), mirrorToSlack(payload)]);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,3 +1,5 @@
+import { env } from "cloudflare:workers";
+
 import { db, now } from "@/lib/db/client";
 import { newId } from "@/lib/db/id";
 import { sendEmail, sendSlack, sendWebhook, slackBlocks } from "@/lib/notify/channels";
@@ -6,23 +8,44 @@ import { getSettings } from "@/lib/status/settings";
 import type { NotificationRow, SubscriberRow } from "@/lib/status/types";
 
 /**
- * Notification fan-out.
+ * Notification fan-out over Cloudflare Queues.
  *
- * Every send is first written to the `notifications` table, then attempted.
- * The table is both the retry ledger and the idempotency guard — the unique
- * index on (subscriber_id, dedupe_key) means re-running the same event, whether
- * from a double-submit or a cron retry, cannot double-send.
+ * Writes go to two places: a row in `notifications`, and a message on the queue
+ * carrying only that row's id. The queue owns scheduling, retries, concurrency,
+ * and the dead-letter hand-off; the table is the durable record of what was
+ * sent, why it failed, and the idempotency guard — a unique index on
+ * `(subscriber_id, dedupe_key)` means the same event can be enqueued twice
+ * without a subscriber hearing about it twice.
  *
- * A Cloudflare Queue would be the textbook fan-out here, but it requires a paid
- * plan; this keeps the page deployable on the free tier with equivalent
- * durability. Swapping one in only touches this file.
+ * Keeping the payload in D1 rather than in the message body means a queued
+ * notification is rendered from current code when it is finally delivered, so a
+ * deploy mid-incident does not send a message built by the previous version.
  */
 
-const MAX_ATTEMPTS = 5;
-/** Attempt n waits 1m, 5m, 15m, 60m. */
-const BACKOFF_SECONDS = [60, 300, 900, 3600];
-/** Per-invocation cap, so one drain cannot exhaust the subrequest budget. */
-const DRAIN_BATCH = 40;
+/** Retry backoff by attempt: 1m, 5m, 15m, 1h, 4h. `max_retries` is 5. */
+const BACKOFF_SECONDS = [60, 300, 900, 3600, 14_400];
+
+/** Queues accepts at most 100 messages per sendBatch call. */
+const SEND_BATCH_LIMIT = 100;
+
+/**
+ * How long a row may sit `pending` before the reconciliation sweep assumes its
+ * queue message was lost and re-enqueues it. Comfortably longer than the
+ * consumer's batch timeout plus a slow delivery.
+ */
+const STUCK_AFTER_SECONDS = 600;
+
+export interface QueuedNotification {
+  notificationId: string;
+}
+
+function queue(): Queue<QueuedNotification> {
+  return env.NOTIFICATIONS;
+}
+
+export function retryDelayForAttempt(attempt: number): number {
+  return BACKOFF_SECONDS[Math.min(attempt - 1, BACKOFF_SECONDS.length - 1)];
+}
 
 function matchesFilter(subscriber: SubscriberRow, payload: NotificationPayload): boolean {
   if (payload.kind === "confirm") return true;
@@ -41,13 +64,11 @@ function matchesFilter(subscriber: SubscriberRow, payload: NotificationPayload):
 }
 
 /**
- * Writes ledger rows for every subscriber the event concerns. Returns the number
- * queued. Call `drain()` afterwards (usually inside `waitUntil`) to send them.
+ * Inserts a ledger row per subscriber, then queues the ids that were actually
+ * new. `DO NOTHING` on conflict means a replayed event inserts nothing and
+ * queues nothing, so dedupe happens before a message is ever created.
  */
-export async function enqueue(
-  payload: NotificationPayload,
-  dedupeKey: string,
-): Promise<number> {
+export async function enqueue(payload: NotificationPayload, dedupeKey: string): Promise<number> {
   const { results } = await db()
     .prepare("SELECT * FROM subscribers WHERE state = 'active'")
     .all<SubscriberRow>();
@@ -57,9 +78,10 @@ export async function enqueue(
 
   const ts = now();
   const serialised = JSON.stringify(payload);
+  const rows = targets.map((subscriber) => ({ id: newId(), subscriberId: subscriber.id }));
 
-  await db().batch(
-    targets.map((subscriber) =>
+  const inserted = await db().batch<unknown>(
+    rows.map((row) =>
       db()
         .prepare(
           `INSERT INTO notifications
@@ -67,11 +89,15 @@ export async function enqueue(
            VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)
            ON CONFLICT(subscriber_id, dedupe_key) DO NOTHING`,
         )
-        .bind(newId(), subscriber.id, dedupeKey, payload.kind, serialised, ts, ts),
+        .bind(row.id, row.subscriberId, dedupeKey, payload.kind, serialised, ts, ts),
     ),
   );
 
-  return targets.length;
+  // Only queue the rows this call created. `changes` is 0 for a conflict.
+  const fresh = rows.filter((_, i) => (inserted[i]?.meta.changes ?? 0) > 0);
+  await publish(fresh.map((row) => row.id));
+
+  return fresh.length;
 }
 
 /** Queues a single notification to one subscriber (confirmation emails). */
@@ -80,34 +106,35 @@ export async function enqueueDirect(
   payload: NotificationPayload,
   dedupeKey: string,
 ): Promise<void> {
+  const id = newId();
   const ts = now();
-  await db()
+
+  const result = await db()
     .prepare(
       `INSERT INTO notifications
          (id, subscriber_id, dedupe_key, kind, payload, state, attempts, next_attempt_at, created_at)
        VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)
        ON CONFLICT(subscriber_id, dedupe_key) DO NOTHING`,
     )
-    .bind(newId(), subscriberId, dedupeKey, payload.kind, JSON.stringify(payload), ts, ts)
+    .bind(id, subscriberId, dedupeKey, payload.kind, JSON.stringify(payload), ts, ts)
     .run();
+
+  if ((result.meta.changes ?? 0) > 0) await publish([id]);
 }
 
-async function deliver(
-  subscriber: SubscriberRow,
-  payload: NotificationPayload,
-  siteUrl: string,
-): Promise<void> {
-  switch (subscriber.type) {
-    case "email":
-      return sendEmail(subscriber, payload, `${siteUrl}/subscribe/unsubscribe?token=${subscriber.unsub_token}`);
-    case "slack":
-      return sendSlack(subscriber.endpoint, payload);
-    case "webhook":
-      return sendWebhook(subscriber, payload);
+/** Sends notification ids to the queue, chunked to the per-call limit. */
+async function publish(notificationIds: string[]): Promise<void> {
+  for (let i = 0; i < notificationIds.length; i += SEND_BATCH_LIMIT) {
+    const chunk = notificationIds.slice(i, i + SEND_BATCH_LIMIT);
+    await queue().sendBatch(chunk.map((notificationId) => ({ body: { notificationId } })));
   }
 }
 
-interface DueRow extends NotificationRow {
+// ---------------------------------------------------------------------------
+// Delivery — called by the queue consumer, one message at a time
+// ---------------------------------------------------------------------------
+
+interface JoinedRow extends NotificationRow {
   sub_id: string;
   sub_type: SubscriberRow["type"];
   sub_endpoint: string;
@@ -117,16 +144,41 @@ interface DueRow extends NotificationRow {
   sub_unsub_token: string;
 }
 
-/**
- * Sends everything that is due. Safe to call concurrently from a request and
- * from cron: rows are re-read each pass and a delivered row moves to 'sent',
- * so the worst case of overlap is a duplicate attempt, not a duplicate message.
- */
-export async function drain(): Promise<{ sent: number; failed: number }> {
-  const settings = await getSettings();
-  const ts = now();
+export type DeliveryOutcome =
+  | { status: "sent" }
+  | { status: "skipped"; reason: string }
+  | { status: "failed"; error: string };
 
-  const { results } = await db()
+async function deliver(
+  subscriber: SubscriberRow,
+  payload: NotificationPayload,
+  siteUrl: string,
+): Promise<void> {
+  switch (subscriber.type) {
+    case "email":
+      return sendEmail(
+        subscriber,
+        payload,
+        `${siteUrl}/subscribe/unsubscribe?token=${subscriber.unsub_token}`,
+      );
+    case "slack":
+      return sendSlack(subscriber.endpoint, payload);
+    case "webhook":
+      return sendWebhook(subscriber, payload);
+  }
+}
+
+/**
+ * Delivers one notification and records the outcome.
+ *
+ * Returns rather than throws, so the consumer decides whether to ack or retry
+ * instead of failing — and taking down — the whole batch.
+ */
+export async function deliverNotification(
+  notificationId: string,
+  attempt: number,
+): Promise<DeliveryOutcome> {
+  const row = await db()
     .prepare(
       `SELECT n.*,
               s.id            AS sub_id,
@@ -138,83 +190,149 @@ export async function drain(): Promise<{ sent: number; failed: number }> {
               s.unsub_token   AS sub_unsub_token
          FROM notifications n
          JOIN subscribers s ON s.id = n.subscriber_id
-        WHERE n.state IN ('pending', 'failed')
-          AND n.next_attempt_at <= ?
-          AND s.state IN ('active', 'pending')
-        ORDER BY n.created_at
+        WHERE n.id = ?`,
+    )
+    .bind(notificationId)
+    .first<JoinedRow>();
+
+  // The row or its subscriber was deleted between enqueue and delivery.
+  if (!row) return { status: "skipped", reason: "notification no longer exists" };
+
+  // Already delivered — a redelivery after the ack was lost. Nothing to do.
+  if (row.state === "sent") return { status: "skipped", reason: "already sent" };
+
+  // Someone unsubscribed while the message was in flight. Honour that.
+  if (row.sub_state === "unsubscribed" || row.sub_state === "bounced") {
+    await db()
+      .prepare("UPDATE notifications SET state = 'abandoned', last_error = ? WHERE id = ?")
+      .bind(`subscriber is ${row.sub_state}`, notificationId)
+      .run();
+    return { status: "skipped", reason: `subscriber is ${row.sub_state}` };
+  }
+
+  const settings = await getSettings();
+  const subscriber: SubscriberRow = {
+    id: row.sub_id,
+    type: row.sub_type,
+    endpoint: row.sub_endpoint,
+    secret: row.sub_secret,
+    state: row.sub_state,
+    component_ids: row.sub_component_ids,
+    confirm_token: null,
+    unsub_token: row.sub_unsub_token,
+    created_at: 0,
+    confirmed_at: null,
+    last_sent_at: null,
+  };
+
+  const ts = now();
+
+  try {
+    await deliver(subscriber, JSON.parse(row.payload) as NotificationPayload, settings.siteUrl);
+  } catch (error) {
+    const message = String(error).slice(0, 500);
+    await db()
+      .prepare(
+        "UPDATE notifications SET state = 'failed', attempts = ?, next_attempt_at = ?, last_error = ? WHERE id = ?",
+      )
+      .bind(attempt, ts + retryDelayForAttempt(attempt), message, notificationId)
+      .run();
+    return { status: "failed", error: message };
+  }
+
+  await db().batch([
+    db()
+      .prepare(
+        "UPDATE notifications SET state = 'sent', sent_at = ?, attempts = ?, last_error = NULL WHERE id = ?",
+      )
+      .bind(ts, attempt, notificationId),
+    db().prepare("UPDATE subscribers SET last_sent_at = ? WHERE id = ?").bind(ts, row.sub_id),
+  ]);
+
+  return { status: "sent" };
+}
+
+/** Marks a notification terminally failed. Called by the dead-letter consumer. */
+export async function abandonNotification(notificationId: string): Promise<void> {
+  await db()
+    .prepare(
+      `UPDATE notifications
+          SET state = 'abandoned',
+              last_error = COALESCE(last_error, 'delivery failed and exhausted all retries')
+        WHERE id = ? AND state != 'sent'`,
+    )
+    .bind(notificationId)
+    .run();
+}
+
+// ---------------------------------------------------------------------------
+// Reconciliation
+// ---------------------------------------------------------------------------
+
+/**
+ * Safety net for rows whose queue message never arrived — a `sendBatch` that
+ * failed after the insert committed, or a message lost to the queue's 24-hour
+ * retention on the free plan.
+ *
+ * This is not the retry path; Queues handles retries. It only catches
+ * notifications that were never queued at all, which is why it waits ten
+ * minutes before touching anything.
+ */
+export async function reconcileStuck(limit = 100): Promise<number> {
+  const cutoff = now() - STUCK_AFTER_SECONDS;
+
+  const { results } = await db()
+    .prepare(
+      `SELECT id FROM notifications
+        WHERE state = 'pending' AND created_at <= ?
+        ORDER BY created_at
         LIMIT ?`,
     )
-    .bind(ts, DRAIN_BATCH)
-    .all<DueRow>();
+    .bind(cutoff, limit)
+    .all<{ id: string }>();
 
-  if (results.length === 0) return { sent: 0, failed: 0 };
+  if (results.length === 0) return 0;
 
-  const outcomes = await Promise.allSettled(
-    results.map(async (row) => {
-      const subscriber: SubscriberRow = {
-        id: row.sub_id,
-        type: row.sub_type,
-        endpoint: row.sub_endpoint,
-        secret: row.sub_secret,
-        state: row.sub_state,
-        component_ids: row.sub_component_ids,
-        confirm_token: null,
-        unsub_token: row.sub_unsub_token,
-        created_at: 0,
-        confirmed_at: null,
-        last_sent_at: null,
-      };
-      await deliver(subscriber, JSON.parse(row.payload) as NotificationPayload, settings.siteUrl);
-      return row.id;
-    }),
-  );
+  await publish(results.map((row) => row.id));
 
-  const statements: D1PreparedStatement[] = [];
-  let sent = 0;
-  let failed = 0;
+  // Push `created_at` forward so the next sweep does not immediately re-queue
+  // the same rows while this attempt is still in flight.
+  const ts = now();
+  await db()
+    .prepare(
+      `UPDATE notifications SET created_at = ?
+        WHERE id IN (${results.map(() => "?").join(", ")})`,
+    )
+    .bind(ts, ...results.map((row) => row.id))
+    .run();
 
-  outcomes.forEach((outcome, i) => {
-    const row = results[i];
+  return results.length;
+}
 
-    if (outcome.status === "fulfilled") {
-      sent++;
-      statements.push(
-        db()
-          .prepare(
-            "UPDATE notifications SET state = 'sent', sent_at = ?, attempts = attempts + 1, last_error = NULL WHERE id = ?",
-          )
-          .bind(ts, row.id),
-        db().prepare("UPDATE subscribers SET last_sent_at = ? WHERE id = ?").bind(ts, row.sub_id),
-      );
-      return;
-    }
+/** Re-queues everything not yet delivered. Backs the admin "retry now" button. */
+export async function requeueUndelivered(limit = 200): Promise<number> {
+  const { results } = await db()
+    .prepare(
+      `SELECT id FROM notifications
+        WHERE state IN ('pending', 'failed', 'abandoned')
+        ORDER BY created_at DESC
+        LIMIT ?`,
+    )
+    .bind(limit)
+    .all<{ id: string }>();
 
-    failed++;
-    const attempts = row.attempts + 1;
-    const message = String(outcome.reason).slice(0, 500);
+  if (results.length === 0) return 0;
 
-    if (attempts >= MAX_ATTEMPTS) {
-      statements.push(
-        db()
-          .prepare(
-            "UPDATE notifications SET state = 'abandoned', attempts = ?, last_error = ? WHERE id = ?",
-          )
-          .bind(attempts, message, row.id),
-      );
-    } else {
-      const delay = BACKOFF_SECONDS[Math.min(attempts - 1, BACKOFF_SECONDS.length - 1)];
-      statements.push(
-        db()
-          .prepare(
-            "UPDATE notifications SET state = 'failed', attempts = ?, next_attempt_at = ?, last_error = ? WHERE id = ?",
-          )
-          .bind(attempts, ts + delay, message, row.id),
-      );
-    }
-  });
+  await db()
+    .prepare(
+      `UPDATE notifications SET state = 'pending', next_attempt_at = ?
+        WHERE id IN (${results.map(() => "?").join(", ")})`,
+    )
+    .bind(now(), ...results.map((row) => row.id))
+    .run();
 
-  await db().batch(statements);
-  return { sent, failed };
+  await publish(results.map((row) => row.id));
+  return results.length;
 }
 
 /**
