@@ -1,0 +1,15 @@
+# Copy to .dev.vars and fill in. Never commit .dev.vars.
+#
+# Generate the password verifier with:
+#   npm run hash-password -- "your-admin-password"
+ADMIN_PASSWORD_HASH=
+
+# Signs admin session cookies. Any long random string; rotating it signs everyone out.
+#   openssl rand -hex 32
+SESSION_SECRET=
+
+# Verifies the HMAC on POST /api/hooks/generic.
+INGEST_SECRET=
+
+# Sender address, on a domain onboarded to Cloudflare Email Service.
+EMAIL_FROM=status@example.com

@@ -88,7 +88,8 @@ export async function enqueueDirect(
        VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)
        ON CONFLICT(subscriber_id, dedupe_key) DO NOTHING`,
     )
-    .bind(newId(), subscriberId, dedupeKey, payload.kind, JSON.stringify(payload), ts, ts);
+    .bind(newId(), subscriberId, dedupeKey, payload.kind, JSON.stringify(payload), ts, ts)
+    .run();
 }
 
 async function deliver(

@@ -36,7 +36,8 @@ async function audit(
     .prepare(
       "INSERT INTO audit_log (actor, action, target_type, target_id, meta, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     )
-    .bind(actor, action, targetType, targetId, meta ? JSON.stringify(meta) : null, now());
+    .bind(actor, action, targetType, targetId, meta ? JSON.stringify(meta) : null, now())
+    .run();
 }
 
 /**

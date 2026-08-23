@@ -12,4 +12,6 @@ next-env.d.ts
 
 # generated seed output
 .seed.sql
-.dev.vars
+
+# incremental typecheck cache
+tsconfig.tsbuildinfo
