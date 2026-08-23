@@ -17,6 +17,9 @@ SEEKRIT_TOKEN=
 # `ADMIN_PASSWORD_HASH=` prefix or wrapping quotes are tolerated, a truncated
 # value is not. Check a password against what is stored here with:
 #   npm run hash-password -- --check
+# Iterations are capped at 100000: Workers refuses more in one PBKDF2 call, and
+# local workerd does not enforce that, so a larger count works in dev and makes
+# production sign-in impossible.
 ADMIN_PASSWORD_HASH=
 
 # Signs admin session cookies. Any long random string; rotating it signs everyone out.
