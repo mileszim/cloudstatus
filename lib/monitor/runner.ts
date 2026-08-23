@@ -108,8 +108,13 @@ export async function applyResult(monitor: MonitorRow, result: CheckResult): Pro
     return;
   }
 
-  // Recovering: same idea in reverse.
-  if (ok && consecutiveSuccesses === monitor.recovery_threshold && monitor.last_ok === 0) {
+  // Recovering: same idea in reverse. "Was it broken?" is answered by the open
+  // incident or the component's current status, not by the previous check's
+  // outcome — by the time the threshold is met, the previous check already
+  // succeeded, so last_ok would always read as healthy.
+  const wasBroken = openIncident !== null || (await componentStatus(monitor.component_id)) !== "operational";
+
+  if (ok && consecutiveSuccesses === monitor.recovery_threshold && wasBroken) {
     if (openIncident) {
       await addIncidentUpdate(
         openIncident.id,
@@ -125,6 +130,14 @@ export async function applyResult(monitor: MonitorRow, result: CheckResult): Pro
       await setComponentStatus(monitor.component_id, "operational", actor, { notify: false });
     }
   }
+}
+
+async function componentStatus(componentId: string): Promise<ComponentStatus> {
+  const row = await db()
+    .prepare("SELECT status FROM components WHERE id = ?")
+    .bind(componentId)
+    .first<{ status: ComponentStatus }>();
+  return row?.status ?? "operational";
 }
 
 /** The still-open incident this monitor opened, if any. */
