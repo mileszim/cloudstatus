@@ -32,8 +32,8 @@ completed at the times you set, degrading and restoring components as it goes.
 
 **Subscribers** — email (double opt-in, one-click unsubscribe), Slack incoming
 webhooks, and signed HTTP webhooks, each optionally filtered to specific
-components. Delivery goes through a ledger in D1 that doubles as the retry queue
-and the idempotency guard.
+components. Delivery runs on Cloudflare Queues, off the request path, with
+automatic retries and a dead-letter queue.
 
 **Integrations** — inbound webhooks for PagerDuty, Datadog, and a signed generic
 hook; an authenticated write API for your own automation; Atom and RSS feeds; SVG
@@ -46,10 +46,12 @@ speak that format work against this page unmodified.
 
 ## Setup
 
-### 1. Create the database
+### 1. Create the database and queues
 
 ```bash
 npx wrangler d1 create cloudstatus
+npx wrangler queues create cloudstatus-notifications
+npx wrangler queues create cloudstatus-notifications-dlq
 ```
 
 Put the returned `database_id` into [wrangler.jsonc](wrangler.jsonc), then apply
@@ -139,7 +141,7 @@ Then open `/admin/settings` and set the public URL, page name, and time zone.
 ## How it fits together
 
 ```
-worker/index.ts          fetch → vinext handler; scheduled → cron tasks
+worker/index.ts          fetch → vinext handler; scheduled → cron; queue → delivery
 app/(public)/            status page, incident history, uptime, subscribe
 app/(admin)/admin/       dashboard behind a signed session cookie
 app/api/v2/*             Statuspage-compatible public JSON
@@ -147,19 +149,45 @@ app/api/v1/*             authenticated write API (Bearer key)
 app/api/hooks/*          PagerDuty / Datadog / generic ingest
 lib/status/mutations.ts  every write that changes what the page says
 lib/monitor/             check runner, thresholds, rollups
-lib/notify/              channel adapters and the delivery ledger
+lib/notify/              channel adapters, queue producer, delivery ledger
+worker/queue.ts          queue consumer and dead-letter handler
 ```
 
 vinext's default entry only exports `fetch`, so [worker/index.ts](worker/index.ts)
-delegates to it and adds `scheduled()`. One Worker serves the page and runs the
-cron.
+delegates to it and adds `scheduled()` and `queue()`. One Worker serves the page,
+runs the crons, and consumes the notification queues.
 
-Two schedules share that handler:
+Two schedules share the cron handler:
 
-- `* * * * *` — run due monitor checks, advance maintenance windows, retry
-  failed notifications
+- `* * * * *` — run due monitor checks, advance maintenance windows, re-queue
+  any notification whose queue message was lost
 - `17 3 * * *` — fold raw checks into daily uptime buckets, prune history older
   than seven days
+
+### Notification delivery
+
+A write that notifies subscribers inserts one row per subscriber into
+`notifications` and puts that row's id on the queue. The request returns there —
+an operator posting an update during an outage waits on D1, not on a mail
+provider.
+
+The consumer acks or retries each message individually. Letting the handler
+throw would retry the whole batch, so one unreachable webhook would resend nine
+emails that already arrived. Retries back off 1m → 5m → 15m → 1h → 4h; after
+five attempts the message lands on `cloudstatus-notifications-dlq`, whose
+consumer marks the row `abandoned` with the reason, so the delivery log in the
+dashboard shows what happened instead of leaving a row stuck on "failed".
+
+The table is still the durable record and the idempotency guard: a unique index
+on `(subscriber_id, dedupe_key)` means a replayed event inserts nothing and
+therefore queues nothing. Payloads live in D1 rather than in the message body,
+so a notification queued before a deploy is rendered by the code that delivers
+it.
+
+On the Workers Free plan Queues allows 10,000 operations per day and holds
+messages for 24 hours. A delivered notification costs roughly three operations
+(write, read, delete), so the free tier covers a few thousand notifications a
+day — an incident fanning out to 500 subscribers is about 1,500 of them.
 
 All four ways of changing state — the admin UI, the write API, the ingest hooks,
 and the check runner — go through
@@ -265,12 +293,12 @@ X-Cloudstatus-Event: incident_update | component_status
 
 ## Notes on a few choices
 
-**No Cloudflare Queues.** Queues would be the textbook fan-out for
-notifications, but it needs a paid Workers plan. The `notifications` table serves
-as both retry ledger and idempotency guard — a unique index on
-`(subscriber_id, dedupe_key)` means a retry cannot double-send — which keeps the
-whole thing deployable on the free tier. Swapping a Queue in later touches only
-[lib/notify/dispatch.ts](lib/notify/dispatch.ts).
+**Queues, not a polling loop.** Notification delivery is a real queue with a
+dead-letter queue rather than a cron that scans a table. Queues is available on
+the Workers Free plan, and it owns retry scheduling, backoff, and concurrency
+limits — all things a hand-rolled loop gets subtly wrong. The cron still runs a
+reconciliation sweep, but only for rows that were written and never queued at
+all; it is a safety net, not the retry path.
 
 **No KV for API caching.** KV's minimum TTL is 60 seconds, too coarse for status
 data. The public endpoints use `Cache-Control` and let Cloudflare's CDN cache
@@ -302,6 +330,10 @@ npm run preview          # build, then serve with wrangler
 Cron triggers do not fire under `npm run dev`. Use **Run checks now** in the
 dashboard to exercise the monitoring path, or `npm run preview` and hit
 `http://localhost:8787/__scheduled?cron=*+*+*+*+*`.
+
+Queues *do* run locally — miniflare produces and consumes them in-process, so
+subscribing, delivery, retries, and the dead-letter hand-off all work under
+`npm run dev` with no extra setup.
 
 Email is simulated locally — `wrangler dev` writes each message to
 `.wrangler/tmp/email/` and logs the paths. Set `"remote": true` on the

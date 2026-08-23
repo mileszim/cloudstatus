@@ -1,6 +1,6 @@
 import { SendIcon, Trash2Icon } from "lucide-react";
 
-import { addSubscriberAction, deleteSubscriberAction, drainNotificationsAction } from "../actions";
+import { addSubscriberAction, deleteSubscriberAction, retryNotificationsAction } from "../actions";
 import { Field } from "@/components/admin/field";
 import { SubmitButton } from "@/components/admin/form";
 import { PageHeader, Section } from "@/components/admin/page-header";
@@ -59,10 +59,10 @@ export default async function SubscribersPage() {
         title="Subscribers"
         description={`${counts?.active ?? 0} active · ${counts?.pending ?? 0} awaiting confirmation · ${counts?.unsubscribed ?? 0} unsubscribed`}
         action={
-          <form action={drainNotificationsAction}>
-            <SubmitButton variant="outline" size="sm" pendingLabel="Sending…">
+          <form action={retryNotificationsAction}>
+            <SubmitButton variant="outline" size="sm" pendingLabel="Re-queuing…">
               <SendIcon className="size-3.5" />
-              Send queued now
+              Retry undelivered
             </SubmitButton>
           </form>
         }
@@ -131,7 +131,7 @@ export default async function SubscribersPage() {
 
         <Section
           title="Delivery log"
-          description="The most recent 40 notifications. Failed rows are retried by the minute cron with backoff."
+          description="The most recent 40 notifications. Queues retries failures automatically with backoff; anything that exhausts its retries lands here as abandoned."
         >
           <ul className="divide-y">
             {notifications.results.map((notification) => (

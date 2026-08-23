@@ -1,11 +1,11 @@
 import { advanceMaintenances, rollupAndPrune, runDueChecks } from "@/lib/monitor/runner";
-import { drain } from "@/lib/notify/dispatch";
+import { reconcileStuck } from "@/lib/notify/dispatch";
 
 /**
  * Cron entry point. Two schedules share one handler, distinguished by `cron`:
  *
  *   "* * * * *"  minute  — probe due monitors, advance maintenance windows,
- *                          retry notifications that failed earlier
+ *                          re-queue notifications whose queue message was lost
  *   "17 3 * * *" nightly — fold raw checks into daily uptime buckets and prune
  *
  * The nightly cron fires at :17 rather than on the hour to stay off the
@@ -23,7 +23,9 @@ export async function runScheduled(cron: string, _env: Env): Promise<void> {
   const [checks, maintenance, notifications] = await Promise.allSettled([
     runDueChecks(),
     advanceMaintenances(),
-    drain(),
+    // Not the retry path — Queues owns retries. This only catches rows that
+    // were written but never made it onto the queue.
+    reconcileStuck(),
   ]);
 
   if (checks.status === "fulfilled" && checks.value.checked > 0) {
@@ -39,11 +41,9 @@ export async function runScheduled(cron: string, _env: Env): Promise<void> {
     console.error("[cron] maintenance transitions failed", maintenance.reason);
   }
 
-  if (notifications.status === "fulfilled" && notifications.value.sent > 0) {
-    console.log(
-      `[cron] notifications: ${notifications.value.sent} sent, ${notifications.value.failed} failed`,
-    );
+  if (notifications.status === "fulfilled" && notifications.value > 0) {
+    console.log(`[cron] re-queued ${notifications.value} stuck notifications`);
   } else if (notifications.status === "rejected") {
-    console.error("[cron] notification drain failed", notifications.reason);
+    console.error("[cron] notification reconciliation failed", notifications.reason);
   }
 }

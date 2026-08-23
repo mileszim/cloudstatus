@@ -6,7 +6,7 @@ import { requireAdmin } from "@/lib/auth/session";
 import { db } from "@/lib/db/client";
 import { newId, newToken } from "@/lib/db/id";
 import { runDueChecks, runMonitorNow } from "@/lib/monitor/runner";
-import { drain } from "@/lib/notify/dispatch";
+import { requeueUndelivered } from "@/lib/notify/dispatch";
 import {
   addIncidentUpdate,
   createComponent,
@@ -399,9 +399,10 @@ export async function deleteSubscriberAction(form: FormData): Promise<void> {
   await deleteSubscriber(str(form, "id"), ACTOR);
 }
 
-export async function drainNotificationsAction(): Promise<void> {
+/** Puts every undelivered notification back on the queue. */
+export async function retryNotificationsAction(): Promise<void> {
   await requireAdmin();
-  await drain();
+  await requeueUndelivered();
 }
 
 // ---------------------------------------------------------------------------
