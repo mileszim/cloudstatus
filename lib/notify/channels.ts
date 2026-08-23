@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 
 import type { NotificationPayload } from "@/lib/notify/payload";
+import { secret } from "@/lib/secrets";
 import {
   COMPONENT_STATUS_LABEL,
   INCIDENT_STATUS_LABEL,
@@ -110,7 +111,7 @@ export async function sendEmail(
   payload: NotificationPayload,
   unsubUrl: string,
 ): Promise<void> {
-  const from = env.EMAIL_FROM;
+  const from = await secret("EMAIL_FROM");
   if (!from) {
     throw new Error("EMAIL_FROM is not set, so subscriber email cannot be sent.");
   }

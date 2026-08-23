@@ -1,5 +1,4 @@
-import { env } from "cloudflare:workers";
-
+import { secret } from "@/lib/secrets";
 import { handleAlert, verifySignature, type AlertState } from "@/lib/status/ingest";
 
 /**
@@ -13,8 +12,8 @@ import { handleAlert, verifySignature, type AlertState } from "@/lib/status/inge
  *   X-Cloudstatus-Timestamp: <unix seconds>   (optional)
  */
 export async function POST(request: Request) {
-  const secret = env.INGEST_SECRET;
-  if (!secret) {
+  const ingestSecret = await secret("INGEST_SECRET");
+  if (!ingestSecret) {
     return Response.json(
       { error: "not_configured", message: "INGEST_SECRET is not set on this deployment." },
       { status: 503 },
@@ -24,7 +23,7 @@ export async function POST(request: Request) {
   const raw = await request.text();
 
   const valid = await verifySignature(
-    secret,
+    ingestSecret,
     raw,
     request.headers.get("x-cloudstatus-signature"),
     request.headers.get("x-cloudstatus-timestamp"),

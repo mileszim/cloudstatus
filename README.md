@@ -85,6 +85,33 @@ For production, set the same four with `npx wrangler secret put <NAME>`.
 | `INGEST_SECRET` | Verifies the generic ingest webhook's HMAC |
 | `EMAIL_FROM` | Sender address, on a domain onboarded to Cloudflare Email Service |
 
+#### Or keep them in seekrit
+
+Set one secret instead of four and let [seekrit](https://seekrit.dev) hold the
+rest:
+
+```bash
+npx wrangler secret put SEEKRIT_TOKEN     # skt_... service token
+```
+
+[lib/secrets.ts](lib/secrets.ts) resolves the table above through
+`@seekrit/sdk` — the API returns ciphertext and the Worker decrypts it, so the
+values are readable only by the token. Rotating one in seekrit reaches the
+deployment within a minute, with no redeploy and no `wrangler secret put`.
+
+Two things make that safe for a status page:
+
+- **A Worker secret still wins.** Any name set with `wrangler secret put` is
+  used as-is and seekrit is never consulted for it. That is the break-glass
+  path, and it makes the migration reversible one name at a time.
+- **Stale beats down.** Resolved values are cached per isolate for a minute; if
+  a revalidation fails, the last good set keeps being served and the failure is
+  logged. Only a cold isolate with nothing cached fails closed.
+
+The public status page reads no secrets at all, so it is unaffected either way
+— only `/admin`, the generic ingest webhook, and subscriber email resolve
+anything.
+
 ### 3. Run it
 
 ```bash

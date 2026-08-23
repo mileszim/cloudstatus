@@ -1,5 +1,6 @@
-import { env } from "cloudflare:workers";
 import { cookies } from "next/headers";
+
+import { secret } from "@/lib/secrets";
 
 /**
  * Stateless admin sessions: an HMAC-SHA256 signed `<expiry>.<signature>` cookie.
@@ -12,11 +13,11 @@ import { cookies } from "next/headers";
 export const SESSION_COOKIE = "__cs_session";
 const MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
 
-function secret(): string {
-  const value = env.SESSION_SECRET;
+async function signingKey(): Promise<string> {
+  const value = await secret("SESSION_SECRET");
   if (!value) {
     throw new Error(
-      "SESSION_SECRET is not set. Add it to .dev.vars locally, or run `wrangler secret put SESSION_SECRET`.",
+      "SESSION_SECRET is not set. Add it to seekrit or to .dev.vars locally, or run `wrangler secret put SESSION_SECRET`.",
     );
   }
   return value;
@@ -25,7 +26,7 @@ function secret(): string {
 async function sign(payload: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
-    new TextEncoder().encode(secret()),
+    new TextEncoder().encode(await signingKey()),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
@@ -90,6 +91,10 @@ export async function requireAdmin(): Promise<void> {
   }
 }
 
-export function adminConfigured(): boolean {
-  return Boolean(env.ADMIN_PASSWORD_HASH && env.SESSION_SECRET);
+export async function adminConfigured(): Promise<boolean> {
+  const [verifier, signing] = await Promise.all([
+    secret("ADMIN_PASSWORD_HASH"),
+    secret("SESSION_SECRET"),
+  ]);
+  return Boolean(verifier && signing);
 }
