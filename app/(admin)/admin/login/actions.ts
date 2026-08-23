@@ -22,10 +22,24 @@ function safeRedirect(next: FormDataEntryValue | null): string {
 }
 
 export async function login(_prev: LoginState, formData: FormData): Promise<LoginState> {
-  const [verifier, signing] = await Promise.all([
-    secret("ADMIN_PASSWORD_HASH"),
-    secret("SESSION_SECRET"),
-  ]);
+  // A cold isolate that cannot reach the secret store fails closed by design
+  // (see lib/secrets.ts). Letting that reject here would surface as a bare 500
+  // on the sign-in form, which says nothing about why.
+  let verifier: string | undefined;
+  let signing: string | undefined;
+  try {
+    [verifier, signing] = await Promise.all([
+      secret("ADMIN_PASSWORD_HASH"),
+      secret("SESSION_SECRET"),
+    ]);
+  } catch (error) {
+    console.error("[login] could not resolve secrets", error);
+    return {
+      error:
+        "Could not read this deployment's secrets, so sign-in cannot be checked. Retry in a moment; if it persists, check SEEKRIT_TOKEN and the seekrit API.",
+    };
+  }
+
   if (!verifier) {
     return {
       error:
