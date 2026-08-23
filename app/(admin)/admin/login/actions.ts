@@ -1,6 +1,5 @@
 "use server";
 
-import { env } from "cloudflare:workers";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
@@ -10,6 +9,7 @@ import {
   createSessionCookieValue,
   sessionCookieOptions,
 } from "@/lib/auth/session";
+import { secret } from "@/lib/secrets";
 
 export interface LoginState {
   error?: string;
@@ -22,14 +22,17 @@ function safeRedirect(next: FormDataEntryValue | null): string {
 }
 
 export async function login(_prev: LoginState, formData: FormData): Promise<LoginState> {
-  const verifier = env.ADMIN_PASSWORD_HASH;
+  const [verifier, signing] = await Promise.all([
+    secret("ADMIN_PASSWORD_HASH"),
+    secret("SESSION_SECRET"),
+  ]);
   if (!verifier) {
     return {
       error:
         "No admin password is configured. Run `npm run hash-password` and set ADMIN_PASSWORD_HASH.",
     };
   }
-  if (!env.SESSION_SECRET) {
+  if (!signing) {
     return { error: "SESSION_SECRET is not set, so sessions cannot be signed." };
   }
 

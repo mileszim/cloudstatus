@@ -4,6 +4,7 @@
   "private": true,
   "packageManager": "npm@11.12.1",
   "dependencies": {
+    "@seekrit/sdk": "^0.7.0",
     "@vinext/cloudflare": "latest",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
