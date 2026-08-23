@@ -96,6 +96,14 @@ verifier to check one you have copied from somewhere else. If sign-in rejects a
 password you are sure of, run this first — it distinguishes a wrong password
 from a verifier that was damaged in transit.
 
+> **Iterations are capped at 100,000.** Cloudflare Workers refuses more than
+> that in a single PBKDF2 call, as a DoS guard for a multi-tenant runtime, and
+> **local workerd does not enforce the cap**. A verifier generated above it
+> therefore passes every local test and then makes sign-in impossible once
+> deployed. `npm run hash-password` and `--check` both refuse to go over it, so
+> dev and production agree. See
+> [workerd#1346](https://github.com/cloudflare/workerd/issues/1346).
+
 | Secret | Purpose |
 | --- | --- |
 | `ADMIN_PASSWORD_HASH` | PBKDF2 verifier for the admin password |
