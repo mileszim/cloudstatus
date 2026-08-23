@@ -39,15 +39,6 @@
 		}
 	],
 
-	/** Short-TTL cache for the public JSON API and rendered status payloads. */
-	"kv_namespaces": [
-		{
-			"binding": "CACHE",
-			// Replace with the id from `npx wrangler kv namespace create CACHE`.
-			"id": "00000000000000000000000000000000"
-		}
-	],
-
 	/**
 	 * Outbound subscriber email. Requires a domain onboarded to Cloudflare Email Service.
 	 * Without it, email notifications are skipped and logged; every other channel still works.
