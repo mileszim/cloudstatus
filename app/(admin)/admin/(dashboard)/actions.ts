@@ -1,5 +1,6 @@
 "use server";
 
+import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
 import { requireAdmin } from "@/lib/auth/session";
@@ -45,6 +46,26 @@ import {
  */
 
 const ACTOR = "admin";
+
+/**
+ * Drops every cached render and refreshes whatever the browser is showing.
+ *
+ * A Server Action does not refresh the client on its own. Without an explicit
+ * revalidation the router keeps the RSC payload it already has, so a saved
+ * change only appears after a full reload — and worse, React resets the form
+ * once the action settles, snapping each field back to the stale
+ * `defaultValue` it was rendered with. That reads as the save having been
+ * rejected when in fact the row was written.
+ *
+ * There is no useful narrower target. The admin pages and the public page read
+ * the same rows, a renamed component shows up on both, and the page name sits
+ * in both headers, so almost every mutation here is visible from more than one
+ * route. Invalidating the root layout covers all of them for the price of a
+ * re-render of pages that were going to hit the database anyway.
+ */
+function revalidateAll(): void {
+  revalidatePath("/", "layout");
+}
 
 // ---------------------------------------------------------------------------
 // Form parsing
@@ -112,6 +133,7 @@ export async function createComponentAction(form: FormData): Promise<void> {
     },
     ACTOR,
   );
+  revalidateAll();
 }
 
 export async function updateComponentAction(form: FormData): Promise<void> {
@@ -127,16 +149,19 @@ export async function updateComponentAction(form: FormData): Promise<void> {
     },
     ACTOR,
   );
+  revalidateAll();
 }
 
 export async function deleteComponentAction(form: FormData): Promise<void> {
   await requireAdmin();
   await deleteComponent(str(form, "id"), ACTOR);
+  revalidateAll();
 }
 
 export async function moveComponentAction(form: FormData): Promise<void> {
   await requireAdmin();
   await moveComponent(str(form, "id"), str(form, "direction") === "up" ? "up" : "down", ACTOR);
+  revalidateAll();
 }
 
 export async function setComponentStatusAction(form: FormData): Promise<void> {
@@ -147,11 +172,13 @@ export async function setComponentStatusAction(form: FormData): Promise<void> {
     ACTOR,
     { notify: bool(form, "notify") },
   );
+  revalidateAll();
 }
 
 export async function createGroupAction(form: FormData): Promise<void> {
   await requireAdmin();
   await createGroup({ name: str(form, "name"), description: optionalStr(form, "description") }, ACTOR);
+  revalidateAll();
 }
 
 export async function updateGroupAction(form: FormData): Promise<void> {
@@ -161,11 +188,13 @@ export async function updateGroupAction(form: FormData): Promise<void> {
     { name: str(form, "name"), description: optionalStr(form, "description") },
     ACTOR,
   );
+  revalidateAll();
 }
 
 export async function deleteGroupAction(form: FormData): Promise<void> {
   await requireAdmin();
   await deleteGroup(str(form, "id"), ACTOR);
+  revalidateAll();
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +238,8 @@ export async function createIncidentAction(form: FormData): Promise<void> {
     ACTOR,
   );
 
+  revalidateAll();
+
   redirect(`/admin/incidents/${id}`);
 }
 
@@ -228,6 +259,7 @@ export async function addIncidentUpdateAction(form: FormData): Promise<void> {
     },
     ACTOR,
   );
+  revalidateAll();
 }
 
 export async function updateIncidentDetailsAction(form: FormData): Promise<void> {
@@ -243,16 +275,20 @@ export async function updateIncidentDetailsAction(form: FormData): Promise<void>
     },
     ACTOR,
   );
+  revalidateAll();
 }
 
 export async function publishPostmortemAction(form: FormData): Promise<void> {
   await requireAdmin();
   await publishPostmortem(str(form, "incidentId"), str(form, "body"), ACTOR);
+  revalidateAll();
 }
 
 export async function deleteIncidentAction(form: FormData): Promise<void> {
   await requireAdmin();
   await deleteIncident(str(form, "incidentId"), ACTOR);
+  revalidateAll();
+
   redirect("/admin/incidents");
 }
 
@@ -321,6 +357,7 @@ export async function createMonitorAction(form: FormData): Promise<void> {
       ts,
     )
     .run();
+  revalidateAll();
 }
 
 export async function updateMonitorAction(form: FormData): Promise<void> {
@@ -357,16 +394,19 @@ export async function updateMonitorAction(form: FormData): Promise<void> {
       str(form, "id"),
     )
     .run();
+  revalidateAll();
 }
 
 export async function deleteMonitorAction(form: FormData): Promise<void> {
   await requireAdmin();
   await db().prepare("DELETE FROM monitors WHERE id = ?").bind(str(form, "id")).run();
+  revalidateAll();
 }
 
 export async function runMonitorAction(form: FormData): Promise<void> {
   await requireAdmin();
   await runMonitorNow(str(form, "id"));
+  revalidateAll();
 }
 
 /**
@@ -377,6 +417,7 @@ export async function runMonitorAction(form: FormData): Promise<void> {
 export async function runAllChecksAction(): Promise<void> {
   await requireAdmin();
   await runDueChecks();
+  revalidateAll();
 }
 
 // ---------------------------------------------------------------------------
@@ -392,17 +433,20 @@ export async function addSubscriberAction(form: FormData): Promise<void> {
     // the endpoint, and a Slack or webhook URL has no inbox to confirm from.
     preConfirmed: true,
   });
+  revalidateAll();
 }
 
 export async function deleteSubscriberAction(form: FormData): Promise<void> {
   await requireAdmin();
   await deleteSubscriber(str(form, "id"), ACTOR);
+  revalidateAll();
 }
 
 /** Puts every undelivered notification back on the queue. */
 export async function retryNotificationsAction(): Promise<void> {
   await requireAdmin();
   await requeueUndelivered();
+  revalidateAll();
 }
 
 // ---------------------------------------------------------------------------
@@ -427,6 +471,8 @@ export async function createApiKeyAction(form: FormData): Promise<void> {
     .bind(newId(), str(form, "name") || "Untitled key", hash, token.slice(0, 11), Math.floor(Date.now() / 1000))
     .run();
 
+  revalidateAll();
+
   redirect(`/admin/integrations?token=${encodeURIComponent(token)}`);
 }
 
@@ -436,6 +482,7 @@ export async function revokeApiKeyAction(form: FormData): Promise<void> {
     .prepare("UPDATE api_keys SET revoked_at = ? WHERE id = ?")
     .bind(Math.floor(Date.now() / 1000), str(form, "id"))
     .run();
+  revalidateAll();
 }
 
 export async function createIntegrationRuleAction(form: FormData): Promise<void> {
@@ -463,11 +510,13 @@ export async function createIntegrationRuleAction(form: FormData): Promise<void>
       Math.floor(Date.now() / 1000),
     )
     .run();
+  revalidateAll();
 }
 
 export async function deleteIntegrationRuleAction(form: FormData): Promise<void> {
   await requireAdmin();
   await db().prepare("DELETE FROM integration_rules WHERE id = ?").bind(str(form, "id")).run();
+  revalidateAll();
 }
 
 // ---------------------------------------------------------------------------
@@ -491,4 +540,5 @@ export async function updateSettingsAction(form: FormData): Promise<void> {
   };
 
   await updateSettings(patch);
+  revalidateAll();
 }
